@@ -36,14 +36,31 @@ _
     },
 };
 sub build_bind_zones {
-    require Data::Sah;
+    #require Data::Sah;
+    require Data::Transmute;
+    require DNS::Zone::Struct::To::BIND;
+    require YAML::XS;
 
     my %args = @_;
 
-    my $code_validate_domain = Data::Sah::gen_validator(
-        "net::hostname*",
-        {return_type=>"str"},
-    );
+    #my $code_validate_domain = Data::Sah::gen_validator(
+    #    "net::hostname*",
+    #    {return_type=>"str"},
+    #);
+
+    eval {
+        local @INC = @INC;
+        push @INC, "/c/lib/perl";
+        push @INC, "/c/lib/perl/cpan";
+        require Spanel::Utils;
+        Spanel::Utils::load_config();
+        Spanel::Utils::load_servers_config();
+    };
+    if ($@) {
+        log_info "Cannot load servers config: $@";
+    }
+
+    my $orig_cwd = $CWD;
     local $CWD = "/u";
     for my $user (glob "*") {
         next unless -d $user;
@@ -54,16 +71,77 @@ sub build_bind_zones {
         }
         local $CWD = "$user/sysetc";
         for my $yaml_file (glob "zone=*") {
+            # skip backup files
             next if $yaml_file =~ /~$/;
+
             log_info "Processing file $yaml_file ...";
             my ($domain) = $yaml_file =~ /^zone=(.+)/;
-            if (my $err = $code_validate_domain->($domain)) {
-                log_warn "$domain is not a valid hostname, skipping file $yaml_file";
+            #if (my $err = $code_validate_domain->($domain)) {
+            #    log_warn "$domain is not a valid hostname, skipping file $yaml_file";
+            #    next;
+            #}
+
+            my $output_file = "$orig_cwd/db.$domain";
+            if (-f $output_file) {
+                unless ($args{overwrite}) {
+                    log_info "$yaml_file: Output file $output_file already exists (and we're not overwriting), skipped";
+                    next;
+                }
+            }
+
+            my $spanel_struct_zone;
+            eval { $spanel_struct_zone = YAML::XS::LoadFile($yaml_file) };
+            if ($@) {
+                log_warn "$yaml_file cannot be loaded: $@, skipped";
                 next;
             }
-            print "";
-        }
-    }
+
+            # replace ^serverXXX in 'address' fields with the server's actual IP addresses
+            for my $rec (@{ $spanel_struct_zone->{records} }) {
+                next unless $rec->{address} && $rec->{address} =~ /^\^(.+)/;
+                my $servername = $1;
+                if    ($main::SPANEL_SERVERS->{$servername}) { $rec->{address} = $main::SPANEL_SERVERS->{$servername}{config}{local}{ip}[0] }
+                elsif ($main::CPANEL_SERVERS->{$servername}) { $rec->{address} = $main::CPANEL_SERVERS->{$servername}{config}{local}{ip}[0] }
+                elsif ($main::PLESK_SERVERS ->{$servername}) { $rec->{address} = $main::PLESK_SERVERS ->{$servername}{config}{local}{ip}[0] }
+                else { log_warn "$yaml_file: Unknown server '$servername' mentioned in DNS records, using 0.0.0.0"; $rec->{address} = "0.0.0.0" }
+            }
+
+            my $struct_zone;
+            eval {
+                $struct_zone = Data::Transmute::transmute_data(
+                    data => $spanel_struct_zone,
+                    rules_module => "DNS::Zone::Struct::FromSpanel",
+                );
+            };
+            if ($@) {
+                log_warn "$yaml_file: cannot transmute data: $@, skipped";
+                next;
+            }
+
+            my $bind_zone;
+            eval {
+                $bind_zone = DNS::Zone::Struct::To::BIND::gen_bind_zone_from_struct(
+                    zone => $struct_zone,
+                    master_host => $domain,
+                );
+            };
+            if ($@) {
+                log_warn "$yaml_file: cannot generate BIND zone: $@, skipped";
+                next;
+            }
+
+            open my $fh, ">", $output_file or do {
+                log_warn "$yaml_file: Cannot open $output_file: $!, skipped";
+                next;
+            };
+
+            print $fh $bind_zone;
+            close $fh;
+            log_debug "$yaml_file: wrote $output_file";
+        } # for zone=* file
+    } # for user
+
+    [200];
 }
 
 
