@@ -9,6 +9,7 @@ use warnings;
 use Log::ger;
 
 use File::chdir;
+use List::Util qw(max);
 
 our %SPEC;
 
@@ -128,6 +129,25 @@ sub build_bind_zones {
             if ($@) {
                 log_warn "$yaml_file: cannot generate BIND zone: $@, skipped";
                 next;
+            }
+
+            # insert header
+            $bind_zone = join(
+                "",
+                "; This BIND zone is generated from YAML zone $yaml_file\n",
+                "; on ", scalar(localtime), " by $0\n",
+                $bind_zone);
+
+            # insert metadata
+            if ($main::SPANEL_CONFIG) {
+                my $server_priority = $main::SPANEL_CONFIG->{dns}{zones_priority} // 0;
+                my $zone_priority   = $struct_zone->{priority} // 0;
+                my $priority = max($server_priority, $zone_priority);
+
+                my $meta = "; meta: server=$main::SPANEL_CONFIG->{local}{id}; priority=$priority";
+                $bind_zone =~ s/(\$TTL)/$meta\n$1/ or do {
+                    log_warn "$yaml_file: Warning: cannot insert meta '$meta'";
+                };
             }
 
             open my $fh, ">", $output_file or do {
