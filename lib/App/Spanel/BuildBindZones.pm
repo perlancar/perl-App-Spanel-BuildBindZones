@@ -135,7 +135,7 @@ sub build_bind_zones {
             $bind_zone = join(
                 "",
                 "; This BIND zone is generated from YAML zone $yaml_file\n",
-                "; on ", scalar(localtime), " by $0\n",
+                "; on ", scalar(gmtime), " UTC by $0\n",
                 $bind_zone);
 
             # insert metadata
